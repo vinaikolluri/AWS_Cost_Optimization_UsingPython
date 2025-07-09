@@ -1,0 +1,64 @@
+import json
+import boto3
+
+def lambda_handler(event, context):
+    # Specify your AWS credentials
+    aws_region_name = 'ap-south-1'  # replace 'ap-south-1' with your aws region
+    
+    # Initialize a session using the specified credentials
+    session = boto3.Session(
+        region_name=aws_region_name
+    )
+    
+    # Initialize the EC2 client using the session
+    ec2 = session.client('ec2')
+    
+    # Define the instance IDs of the instances you want to stop
+    instance_ids = ['i-0f48c6eb468b041cf', 'i-05f4cce15f72c0958']  # Replace with your instance IDs
+    
+    # Get the current state of the instances
+    instances = ec2.describe_instances(InstanceIds=instance_ids)['Reservations']
+    
+    # Check if instances are in a running state
+    instances_to_stop = []
+    for reservation in instances:
+        for instance in reservation['Instances']:
+            if instance['State']['Name'] == 'running':
+                instances_to_stop.append(instance)
+    
+    # Initialize lists to store instance states and stopped instance IDs
+    instance_states = []
+    stopped_instance_ids = []
+    
+    # Stop instances sequentially
+    for instance in instances_to_stop:
+        # Stop the instance
+        response = ec2.stop_instances(InstanceIds=[instance['InstanceId']])
+        
+        # Extract the current state of the instance
+        instance_states.append(instance['State']['Name'])
+        
+        # Append the instance ID to the list of stopped instance IDs
+        stopped_instance_ids.append(instance['InstanceId'])
+    
+    # Determine message and subject for SNS notification
+    if stopped_instance_ids:
+        message = f'The following EC2 instances were stopped successfully: {", ".join(stopped_instance_ids)}'
+        subject = 'Instances Stopped Successfully'
+    else:
+        message = 'There were no EC2 instances to stop.'
+        subject = 'No EC2 Instances Stopped'
+    
+    # Publish message to SNS topic
+    sns = boto3.client('sns')
+    sns.publish(
+        TopicArn='arn:aws:sns:ap-south-1:992382447965:StopInstances',  #Replace with your SNS Topic ARN
+        Subject=subject,
+        Message=message  # Use the message variable directly
+    )
+    
+    # Return success message with stopped instance IDs
+    return {
+        'statusCode': 200,
+        'body': json.dumps({'message': message, 'stopped_instance_ids': stopped_instance_ids})
+    }
