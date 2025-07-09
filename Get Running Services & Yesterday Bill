@@ -1,0 +1,170 @@
+import os
+import json
+import boto3
+from datetime import datetime, timedelta
+
+# Initialize AWS clients
+#Replace your AWS Account Region here 
+#If you want get detais about other services you can define based on below i am using EC2 ,RDS,S3, Elatic ,IP
+ce = boto3.client('ce', region_name='ap-south-1')
+ec2 = boto3.client('ec2', region_name='ap-south-1')
+rds = boto3.client('rds', region_name='ap-south-1')
+s3 = boto3.client('s3', region_name='ap-south-1')
+ec2_resource = boto3.resource('ec2', region_name='ap-south-1')
+sns = boto3.client('sns', region_name='ap-south-1')
+
+# Specify your  SNS topic ARN here 
+sns_topic_arn = ''
+
+def lambda_handler(event, context):
+    # Get yesterday's cost
+    yesterday_cost = get_yesterdays_cost()
+
+    # Get running and stopped services
+    running_ec2_ids, stopped_ec2_ids = get_running_and_stopped_ec2()
+    running_rds_ids = get_running_rds()
+    running_s3_buckets = get_running_s3_buckets()
+    elastic_ips = get_elastic_ips()
+
+    # Format email message
+    email_body = format_email(running_ec2_ids, stopped_ec2_ids, running_rds_ids, running_s3_buckets, elastic_ips, yesterday_cost)
+
+    # Publish email body to SNS topic
+    sns_publish_result = sns.publish(
+        TopicArn=sns_topic_arn,
+        Subject='AWS Account Summary Email',
+        Message=email_body
+    )
+
+    print('Email sent to SNS topic.')
+    print('SNS Publish Result:', sns_publish_result)
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Email sent to SNS topic.')
+    }
+
+def get_yesterdays_cost():
+    # Calculate yesterday's date
+    yesterday_date = datetime.utcnow() - timedelta(days=1)
+
+    # Define the time period for the query
+    time_period = {
+        'Start': (yesterday_date - timedelta(days=1)).strftime('%Y-%m-%d'),
+        'End': yesterday_date.strftime('%Y-%m-%d')
+    }
+
+    # Define the granularity of the data (daily)
+    granularity = 'DAILY'
+
+    # Define the metrics to retrieve (Total Estimated Cost)
+    metrics = ['BlendedCost']
+
+    # Query AWS Cost Explorer API
+    response = ce.get_cost_and_usage(
+        TimePeriod=time_period,
+        Granularity=granularity,
+        Metrics=metrics
+    )
+
+    # Parse the response to extract the total cost
+    total_cost = response['ResultsByTime'][0]['Total']['BlendedCost']['Amount']
+
+    return total_cost
+
+def get_running_and_stopped_ec2():
+    # Retrieve EC2 instances
+    ec2_instances = ec2.describe_instances()
+    running_ec2_ids = []
+    stopped_ec2_ids = []
+    for reservation in ec2_instances['Reservations']:
+        for instance in reservation['Instances']:
+            instance_id = instance['InstanceId']
+            instance_name = ''
+            instance_size = ''
+            for tag in instance['Tags']:
+                if tag['Key'] == 'Name':
+                    instance_name = tag['Value']
+                if tag['Key'] == 'InstanceSize':
+                    instance_size = tag['Value']
+            if instance['State']['Name'] == 'running':
+                running_ec2_ids.append((instance_id, instance_name, instance_size))
+            elif instance['State']['Name'] == 'stopped':
+                stopped_ec2_ids.append((instance_id, instance_name, instance_size))
+
+    return running_ec2_ids, stopped_ec2_ids
+
+def get_running_rds():
+    # Retrieve RDS instances
+    rds_instances = rds.describe_db_instances()
+    running_rds_ids = []
+    for instance in rds_instances['DBInstances']:
+        instance_id = instance['DBInstanceIdentifier']
+        instance_name = ''
+        instance_size = ''
+        for tag in instance['TagList']:
+            if tag['Key'] == 'Name':
+                instance_name = tag['Value']
+            if tag['Key'] == 'InstanceSize':
+                instance_size = tag['Value']
+        running_rds_ids.append((instance_id, instance_name, instance_size))
+
+    return running_rds_ids
+
+def get_running_s3_buckets():
+    # Retrieve S3 buckets
+    s3_buckets = s3.list_buckets()
+    running_s3_bucket_names = [bucket['Name'] for bucket in s3_buckets['Buckets']]
+
+    return running_s3_bucket_names
+
+def get_elastic_ips():
+    # Retrieve Elastic IPs
+    elastic_ips = ec2.describe_addresses()
+    elastic_ip_addresses = [address['PublicIp'] for address in elastic_ips['Addresses']]
+
+    return elastic_ip_addresses
+
+def format_email(running_ec2_ids, stopped_ec2_ids, running_rds_ids, running_s3_buckets, elastic_ips, total_cost):
+    email_body = "Rjay AWS Account Summary Email -\n\n"
+    email_body += f"Good Evening,\nHere is a list of Resources running on your account as on {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}:\n\n"
+    email_body += f"ap-south-1 (Mumbai) region:\n\n"
+
+    # Add running EC2 instances
+    if running_ec2_ids:
+        email_body += "EC2 Resources -\n"
+        for instance_id, instance_name, instance_size in running_ec2_ids:
+            email_body += f"{instance_id} {instance_name} {instance_size}\n"
+        email_body += "\n"
+
+    # Add stopped EC2 instances
+    if stopped_ec2_ids:
+        email_body += "Stopped EC2 instances:\n"
+        for instance_id, instance_name, instance_size in stopped_ec2_ids:
+            email_body += f"{instance_id} {instance_name} {instance_size}\n"
+        email_body += "\n"
+
+    # Add running RDS instances
+    if running_rds_ids:
+        email_body += "RDS Resources -\n"
+        for instance_id, instance_name, instance_size in running_rds_ids:
+            email_body += f"{instance_id} {instance_name} {instance_size}\n"
+        email_body += "\n"
+
+    # Add running S3 buckets
+    if running_s3_buckets:
+        email_body += "Running S3 buckets:\n"
+        for bucket_name in running_s3_buckets:
+            email_body += f"{bucket_name}\n"
+        email_body += "\n"
+
+    # Add Elastic IPs
+    if elastic_ips:
+        email_body += "Elastic IPs:\n"
+        for ip_address in elastic_ips:
+            email_body += f"{ip_address}\n"
+        email_body += "\n"
+
+    email_body += f"The total cost incurred for the previous day is: {total_cost} USD\n"
+
+    return email_body
