@@ -1,0 +1,75 @@
+import json
+import boto3
+
+def lambda_handler(event, context):
+    # AWS region
+    aws_region_name = 'ap-south-1'  
+
+    # Initialize a session using the specified region
+    session = boto3.Session(region_name=aws_region_name)
+
+    # Initialize EC2 and SNS clients
+    ec2 = session.client('ec2')
+    sns = session.client('sns')
+
+    # Define instance IDs (replace with your actual IDs)
+    instance_ids = ['i-07ef0c6e421c877f3']  
+
+    # Get the current state of the instances
+    instances = ec2.describe_instances(InstanceIds=instance_ids)['Reservations']
+
+    # Check if instances are in a stopped state
+    instances_to_start = []
+    for reservation in instances:
+        for instance in reservation['Instances']:
+            if instance['State']['Name'] == 'stopped':
+                instances_to_start.append(instance)
+
+    # Lists to track state
+    instance_states = []
+    started_instance_ids = []
+
+    # Start instances if needed
+    for instance in instances_to_start:
+        response = ec2.start_instances(InstanceIds=[instance['InstanceId']])
+        instance_states.append(instance['State']['Name'])
+        started_instance_ids.append(instance['InstanceId'])
+
+    if started_instance_ids:
+        # If instances were started, send SNS
+        started_instance_ids_str = ', '.join(started_instance_ids)
+        sns.publish(
+            TopicArn='arn:aws:sns:ap-south-1:717279731783:StartStopEc2',
+            Subject='Instances Started Successfully',
+            Message=f'Instances started successfully. Instance IDs: {started_instance_ids_str}'
+        )
+
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                'message': 'Instances started successfully.',
+                'started_instance_ids': started_instance_ids
+            })
+        }
+    else:
+        # If instances were already running, notify via SNS
+        all_instances_states = [
+            instance['State']['Name'] 
+            for reservation in instances 
+            for instance in reservation['Instances']
+        ]
+        instance_states_str = ', '.join(all_instances_states)
+
+        sns.publish(
+            TopicArn='arn:aws:sns:ap-south-1:717279731783:StartStopEc2',
+            Subject='Instances Already Running',
+            Message=f'Instances are already running. Current states: {instance_states_str}'
+        )
+
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                'message': 'Instances are already running.',
+                'instance_states': all_instances_states
+            })
+        }
